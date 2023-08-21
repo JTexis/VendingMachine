@@ -1,0 +1,404 @@
+//LIBRERIAS DISPLAY
+#include <Wire.h> 
+#include <LiquidCrystal_I2C.h>
+LiquidCrystal_I2C lcd(0x27,20,4);
+
+//PINES
+const int PIN_CAUDALIMETRO = 2;
+const int PIN_MONEDERO = 3;
+const int PIN_BOMBA_1 = 5;
+const int PIN_BOMBA_2 = 6;
+const int PIN_PULSADOR_3 = 13;
+const int PIN_PULSADOR_2 = 12;
+const int PIN_PULSADOR_1 = 11;
+const int PIN_PULSADOR_ONOFF = 10;
+
+
+//ESTADOS
+const int ESTADO_INICIO = 0;
+const int ESTADO_SELECCION_DE_LIQUIDO = 1;
+const int ESTADO_SELECCION_DE_CANTIDAD = 2;
+const int ESTADO_INSERCION_DE_MONEDAS = 3;
+const int ESTADO_ESPERA_DE_INICIO = 4;
+const int ESTADO_LIQUIDO_DISPENSANDOSE = 5;
+
+//VARIABLES 
+int estado = ESTADO_INICIO;
+int pulsador1Antes = LOW;
+int pulsador1Ahora = LOW;
+int pulsador2Antes = LOW;
+int pulsador2Ahora = LOW;
+int pulsador3Antes = LOW;
+int pulsador3Ahora = LOW;
+int pulsadorOnOffAntes = LOW;
+int pulsadorOnOffAhora = LOW;
+int pulsadorSeleccionado = 0;
+int bombaElegida = 0;
+float cantidadElegida = 0;
+int creditosSolicitados = 0;
+
+
+//CANTIDADES DISPONIBLES A ELEGIR
+const float CANTIDAD_1 = 0.5;
+const float CANTIDAD_2 = 1;
+
+//VOLATILES - VARIABLES DE INTERRUPCIONES
+volatile int creditosDepositados = 0;
+volatile int pulseConter = 0;
+
+
+//INTERRUPCIONES
+void coinInterrupt()
+{
+  creditosDepositados++;
+  
+}
+
+void ISRCountPulse()
+{
+   pulseConter++;
+}
+
+//PARAMETROS DE ESTADO 5
+const int measureInterval = 250;
+const int PWMmin = 65;
+const float factorK = 6.2;
+float cantidadDispensada = 0;
+long t0 = 0;
+
+//FUNCIONES DEL ESTADO 5
+float GetFrequency()
+{
+   pulseConter = 0;
+   interrupts();
+   delay(measureInterval);
+   noInterrupts();
+   return (float)pulseConter * 1000 / measureInterval;
+}
+
+float SumVolume(float dV)
+{
+   cantidadDispensada += dV / 60 * (millis() - t0) / 1000.0;
+   t0 = millis();
+   return cantidadDispensada;
+}
+
+float Voltage(float Acumulacion)
+{
+  float voltage = 1 - (Acumulacion/cantidadElegida );
+  return voltage;
+}
+
+int EnviodeSignal(float porcentaje)
+{
+  int signalPWM = (round(porcentaje*185)) + PWMmin;
+  analogWrite(bombaElegida, signalPWM);
+  return signalPWM;
+}
+
+void liquidoDispensandose()
+{
+  float frequency = GetFrequency();
+  float flow_Lmin = frequency / factorK;
+  float sumVolume = SumVolume(flow_Lmin);
+  float porcentaje = Voltage(sumVolume);
+  int Enviodesignal = EnviodeSignal(porcentaje);
+  Serial.print(" Caudal: ");
+  Serial.print(flow_Lmin, 3);
+  Serial.print(" (L/min)\tConsumo:");
+  Serial.print(cantidadDispensada, 4);
+  Serial.print(" (L)");
+  Serial.print("\t Porcentaje de voltaje: ");
+  Serial.print(porcentaje, 2);
+  Serial.print("\t Señal PWM: ");
+  Serial.print(Enviodesignal);
+  Serial.println(" ");
+  Serial.print(cantidadElegida);
+}
+
+//Inicializar
+void setup()
+{
+  Serial.begin(9600);
+  lcd.init();  
+  interfazEstadoInicio();
+  
+  attachInterrupt(digitalPinToInterrupt(PIN_MONEDERO), coinInterrupt, RISING);
+  attachInterrupt(digitalPinToInterrupt(PIN_CAUDALIMETRO), ISRCountPulse, RISING);
+
+  pinMode(PIN_BOMBA_1, OUTPUT);
+  pinMode(PIN_BOMBA_2, OUTPUT);
+  
+  pinMode(PIN_PULSADOR_1, INPUT);
+  pinMode(PIN_PULSADOR_2, INPUT);
+  pinMode(PIN_PULSADOR_3, INPUT);
+  pinMode(PIN_PULSADOR_ONOFF, INPUT);
+  
+  encenderMaquina();
+}
+
+//Funcionalidad
+void loop()
+{
+  obtenerDatos();
+  controlarCircuito();
+}
+
+void obtenerDatos()
+{
+  pulsadorOnOffAntes = pulsadorOnOffAhora;
+  pulsadorOnOffAhora = digitalRead(PIN_PULSADOR_ONOFF);
+  pulsador1Antes = pulsador1Ahora;
+  pulsador1Ahora = digitalRead(PIN_PULSADOR_1);
+  pulsador2Antes = pulsador2Ahora;
+  pulsador2Ahora = digitalRead(PIN_PULSADOR_2);
+  pulsador3Antes = pulsador3Ahora;
+  pulsador3Ahora = digitalRead(PIN_PULSADOR_3);
+}
+
+void controlarCircuito()
+{
+  switch(estado)
+  {
+    case ESTADO_INICIO:
+    controlarEstadoInicio();
+    break;
+    case ESTADO_SELECCION_DE_LIQUIDO:
+    controlarEstadoSeleccionDeLiquido();
+    break;
+    case ESTADO_SELECCION_DE_CANTIDAD:
+    controlarEstadoSeleccionDeCantidad();
+    break;
+    case ESTADO_INSERCION_DE_MONEDAS:
+    controlarEstadoInsercionDeMonedas();
+    break;
+    case ESTADO_ESPERA_DE_INICIO:
+    controlarEstadoEsperaDeInicio();
+    break;
+    case ESTADO_LIQUIDO_DISPENSANDOSE:
+    liquidoDispensandose();
+    controlarEstadoLiquidoDispensandose();
+    break;
+  }
+}
+
+void controlarEstadoInicio()
+{
+  if((pulsador1Antes == HIGH)&&(pulsador1Ahora == LOW))
+  {
+    pasarAEstado1();
+  }
+}
+
+void controlarEstadoSeleccionDeLiquido()
+{
+  if((pulsador1Antes == HIGH)&&(pulsador1Ahora == LOW))
+  {
+    bombaElegida = PIN_BOMBA_1;
+    pasarAEstado2();
+    
+  }else if((pulsador2Antes == HIGH)&&(pulsador2Ahora == LOW))
+  {
+    bombaElegida = PIN_BOMBA_2;
+    pasarAEstado2();
+    
+  }
+}
+
+void controlarEstadoSeleccionDeCantidad()
+{
+  if((pulsador3Antes == HIGH)&&(pulsador3Ahora == LOW))
+  {
+    pasarAEstado1();
+    
+  }else if((pulsador1Antes == HIGH)&&(pulsador1Ahora == LOW))
+  {
+    cantidadElegida = CANTIDAD_1;
+    pasarAEstado3();
+    
+  }else if((pulsador2Antes == HIGH)&&(pulsador2Ahora == LOW))
+  {
+    cantidadElegida = CANTIDAD_2;
+    pasarAEstado3();
+    
+  }
+}
+
+void controlarEstadoInsercionDeMonedas()
+{
+  if((pulsador3Antes == HIGH)&&(pulsador3Ahora == LOW))
+  {
+    pasarAEstado1();
+    
+  }else if(creditosDepositados >= creditosSolicitados)
+  {
+    pasarAEstado4();
+  }
+}
+
+void controlarEstadoEsperaDeInicio()
+{
+  if((pulsador3Antes == HIGH)&&(pulsador3Ahora == LOW))
+  {
+    pasarAEstado5();
+    
+  }
+}
+
+void controlarEstadoLiquidoDispensandose()
+{
+  if(cantidadDispensada >= cantidadElegida)
+  {
+    interrupts();
+    analogWrite(bombaElegida,0);
+    cantidadDispensada = 0;
+    delay(1000);
+    pasarAEstado1();
+    
+  }
+  if((pulsador3Antes == HIGH)&&(pulsador3Ahora == LOW))
+  {
+    pasarAEstado1();
+    
+  }
+}
+
+void pasarAEstado1()
+{
+  estado = ESTADO_SELECCION_DE_LIQUIDO;
+  interfazEstado1();
+  //delay(500);
+  Serial.println("Estado actual = 1");
+}
+
+void pasarAEstado2()
+{
+  estado = ESTADO_SELECCION_DE_CANTIDAD;
+  interfazEstado2();
+  Serial.println("Estado actual = 2");
+  Serial.println("Pin de la bomba elegida = ");
+  Serial.print(bombaElegida);
+  Serial.println(" ");
+  pulsadorSeleccionado = 0;
+  
+}
+
+void pasarAEstado3()
+{
+  
+  estado = ESTADO_INSERCION_DE_MONEDAS;
+  interfazEstado3();
+  Serial.println("Estado actual = 3");
+  Serial.println("Cantidad elegida = ");
+  Serial.print(cantidadElegida);
+  Serial.println(" ");
+  if(cantidadElegida == 1)
+  {
+    creditosSolicitados = 10;
+  }else if(cantidadElegida == 0.5)
+  {
+    creditosSolicitados = 5;
+  }
+  
+  pulsadorSeleccionado = 0;
+  creditosDepositados = 0;
+  delay(500);
+  
+}
+
+void pasarAEstado4()
+{
+  estado = ESTADO_ESPERA_DE_INICIO;
+  interfazEstado4();
+  Serial.println("Estado actual = 4");
+  Serial.println("Creditos depositados = ");
+  Serial.print(creditosDepositados);
+  Serial.println(" ");
+  Serial.println("Presione el boton 3 para empezar el dispensado...");
+  Serial.println(" ");
+  creditosDepositados = 0;
+  
+}
+
+void pasarAEstado5()
+{
+  estado = ESTADO_LIQUIDO_DISPENSANDOSE;
+  interfazEstado5();
+  Serial.println("Estado actual = 5");
+  Serial.println("Producto dispensandose...");
+  t0 = millis();
+}
+
+void encenderMaquina()
+{
+  estado = ESTADO_INICIO;
+  interfazEstadoInicio();
+  Serial.println("Maquina Apagada");
+}
+
+void interfazEstadoInicio()
+{
+  
+  lcd.init();
+  // Print a message to the LCD.
+  lcd.backlight();
+  lcd.setCursor(2,1);
+  lcd.print(" ESTADO INICIO");
+}
+
+void interfazEstado1()
+{
+  lcd.init();
+  // Print a message to the LCD.
+  lcd.backlight();
+  lcd.setCursor(1,0);
+  lcd.print("SELECCIONE LIQUIDO");
+  lcd.setCursor(2,2);
+  lcd.print("BOTON 1 - PINOL");
+  lcd.setCursor(1,3);
+  lcd.print("BOTON 2 - FABULOSO");
+}
+
+void interfazEstado2()
+{
+  lcd.init();
+  // Print a message to the LCD.
+  lcd.backlight();
+  lcd.setCursor(0,0);
+  lcd.print("SELECCIONE CANTIDAD");
+  lcd.setCursor(0,2);
+  lcd.print("BOTON 1 - 1/2 L $5");
+  lcd.setCursor(0,3);
+  lcd.print("BOTON 2 - 1 L - $10");
+}
+
+void interfazEstado3()
+{
+  lcd.init();
+  // Print a message to the LCD.
+  lcd.backlight();
+  lcd.setCursor(0,1);
+  lcd.print("INGRESE LAS MONEDAS");
+  
+}
+
+void interfazEstado4()
+{
+  lcd.init();
+  // Print a message to the LCD.
+  lcd.backlight();
+  lcd.setCursor(6,0);
+  lcd.print("GRACIAS");
+  lcd.setCursor(0,2);
+  lcd.print("BOTON 3 - DISPENSADO");
+}
+
+void interfazEstado5()
+{
+  lcd.init();
+  // Print a message to the LCD.
+  lcd.backlight();
+  lcd.setCursor(0,1);
+  lcd.print("DISPENSANDO LIQUIDO");
+  
+}
